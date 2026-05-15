@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+*.apk
+*.aar
+*.o
+*.so
+
+# IDE
+.idea/
+*.iml
+
+# Gradle
+.gradle/
+local.properties
+
+# Native
+.externalNativeBuild/
+.cxx/
+.kotlin/
+
+# Other
+*.log
+*.swp
+*.swo

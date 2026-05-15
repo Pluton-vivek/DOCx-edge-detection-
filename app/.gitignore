@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+*.apk
+*.aar
+
+# IDE
+.idea/
+*.iml
+
+# Gradle
+.gradle/
+local.properties
+
+# Native
+.externalNativeBuild/
+.cxx/
+
+# Other
+*.log
+lint-results.xml
+lint-baseline.xml

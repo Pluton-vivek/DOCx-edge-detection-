@@ -1,0 +1,48 @@
+# Android Studio & Gradle
+*.iml
+.gradle/
+.idea/
+local.properties
+build/
+
+# IDE Settings (personal)
+.idea/workspace.xml
+.idea/libraries
+.idea/modules.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/caches
+.idea/shelf
+.idea/inspectionProfiles
+.idea/dictionaries
+.idea/runConfigurations
+.idea/vcs.xml
+.idea/misc.xml
+.idea/gradle.xml
+
+# Native Build
+.externalNativeBuild/
+.cxx/
+.kotlin/
+
+# Build outputs
+bin/
+captures/
+*.apk
+*.aar
+*.zip
+*.jar
+
+# Logs
+*.log
+lint-results.xml
+lint-baseline.xml
+
+# Editor
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

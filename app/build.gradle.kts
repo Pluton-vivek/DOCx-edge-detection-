@@ -26,15 +26,26 @@ android {
                 arguments("-DANDROID_STL=c++_shared")
             }
         }
+
+        // Only build and package native libraries for 64-bit ARM architectures.
+        // This drops the 32-bit ARM, x86, and x86_64 OpenCV/ONNX libs, reducing APK size by ~150MB.
+        ndk {
+            abiFilters += setOf("arm64-v8a")
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            // Optional: you can minify debug builds too, but it slows down compile times.
+            // isMinifyEnabled = false 
         }
     }
     compileOptions {

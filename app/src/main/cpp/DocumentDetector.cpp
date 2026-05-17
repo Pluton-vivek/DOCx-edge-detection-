@@ -515,6 +515,26 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
     }
     // cvtColor(temp1, temp2, COLOR_BGR2GRAY);
     // we give more weight to contours found with threshod then with higher canny
+
+    // --- B.2: Brightness-gated CLAHE ---
+    // Apply CLAHE only in dim conditions (mean brightness < 80).
+    // Skipping it on well-lit images avoids over-amplifying noise.
+    {
+        cv::Scalar meanVal = cv::mean(temp1);
+        double meanBrightness = (meanVal[0] + meanVal[1] + meanVal[2]) / 3.0;
+        const double CLAHE_THRESHOLD = 80.0;
+        if (meanBrightness < CLAHE_THRESHOLD) {
+            cv::Mat labImage;
+            cv::cvtColor(temp1, labImage, cv::COLOR_BGR2Lab);
+            std::vector<cv::Mat> labChannels;
+            cv::split(labImage, labChannels);
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+            clahe->apply(labChannels[0], labChannels[0]);
+            cv::merge(labChannels, labImage);
+            cv::cvtColor(labImage, temp1, cv::COLOR_Lab2BGR);
+        }
+    }
+
     int weight = 3000000;
     // bool shoudlBreak = false;
     for (i = i; i >= minI; i--)
@@ -547,6 +567,18 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
         while (t >= 10)
         {
             cv::Canny(temp2, edged, t * options.cannyFactor, options.cannyFactor * t * 2);
+
+            // --- B.1: Adaptive threshold edge fusion ---
+            // Fuse Canny edges with adaptive threshold edges.
+            // Adaptive thresholding finds edges that Canny misses in low-contrast
+            // and dark-scene captures (e.g. white paper on white desk, dim room).
+            {
+                cv::Mat adaptiveEdges;
+                cv::adaptiveThreshold(temp2, adaptiveEdges, 255,
+                    cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY_INV, 11, 2);
+                cv::bitwise_or(edged, adaptiveEdges, edged);
+            }
+
             cv::dilate(edged, edged, dilateStruct);
             findSquares(edged, width, height, foundSquares, image, drawContours, (weight--));
             if (foundSquares.size() > 0)
@@ -585,6 +617,40 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
                 points[j] *= resizeScale * scale;
             }
             sortPoints(points);
+
+            // --- B.3: Sub-pixel corner refinement ---
+            // cornerSubPix refines each corner to sub-pixel accuracy using
+            // the gradient image around a small search window (5x5 px).
+            // Applied in the downscaled image space, then scaled back.
+            if (points.size() == 4 && !resizedImage.empty()) {
+                cv::Mat grayForSubpix;
+                if (resizedImage.channels() > 1) {
+                    cv::cvtColor(resizedImage, grayForSubpix, cv::COLOR_BGR2GRAY);
+                } else {
+                    grayForSubpix = resizedImage;
+                }
+                std::vector<cv::Point2f> corners2f;
+                double invScale = 1.0 / (resizeScale * scale);
+                for (const auto& p : points) {
+                    corners2f.push_back(cv::Point2f(
+                        static_cast<float>(p.x * invScale),
+                        static_cast<float>(p.y * invScale)
+                    ));
+                }
+                cv::cornerSubPix(
+                    grayForSubpix, corners2f,
+                    cv::Size(5, 5), cv::Size(-1, -1),
+                    cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.1)
+                );
+                double fwdScale = resizeScale * scale;
+                for (int k = 0; k < 4; k++) {
+                    points[k] = cv::Point(
+                        cvRound(corners2f[k].x * fwdScale),
+                        cvRound(corners2f[k].y * fwdScale)
+                    );
+                }
+            }
+
             result.push_back(points);
         }
 

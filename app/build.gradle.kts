@@ -71,6 +71,9 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation("org.opencv:opencv:4.13.0")
+    
+    // ONNX Runtime for ML Inference
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
 
     // CameraX
     val camerax_version = "1.3.3"

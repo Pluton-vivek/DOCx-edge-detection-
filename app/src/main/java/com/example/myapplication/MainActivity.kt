@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,7 +18,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.example.myapplication.detection.OnnxSessionManager
 import com.example.myapplication.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 enum class AppState {
     CAMERA, CROPPING, RESULT
@@ -35,9 +40,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+
+        // Initialize ONNX session in the background — never blocks the main thread.
+        // The capture path checks OnnxSessionManager.isReady() before using it,
+        // so the app works correctly even if the model file is not yet present.
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                OnnxSessionManager.getInstance(applicationContext)
+                    .initialize("docquad/DocQuadNet256.onnx")
+            } catch (e: Exception) {
+                Log.w("MainActivity", "ONNX init failed — app will use OpenCV-only detection: ${e.message}")
+            }
         }
 
         setContent {

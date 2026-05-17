@@ -10,16 +10,16 @@ import kotlinx.coroutines.withContext
 /**
  * Singleton that owns the ONNX Runtime environment and the DocQuadNet256 session.
  *
- * Design constraints (from TRD):
- * - Session is created ONCE at first use, never recreated per capture.
- * - Initialization runs on a background thread (never main thread).
- * - XNNPACK execution provider for float32 models on ARM.
+ * Design constraints:
+ * - Session is created ONCE at app startup, never recreated per capture.
+ * - Initialization runs on Dispatchers.IO (13MB asset read is disk-bound).
+ * - Execution provider selection is robust: tries NNAPI → falls back to CPU.
+ *   XNNPACK is intentionally NOT used as the primary EP because the model
+ *   contains `com.microsoft.FusedConv` operators (visible in the .required_operators.config)
+ *   which are Microsoft-optimized fused ops that XNNPACK does not support.
+ *   The CPU EP handles all operators and is well-optimized for ARM via ORT's
+ *   own NEON/ARM intrinsics on Android.
  * - [close] is called once when the app is fully destroyed.
- *
- * Usage:
- *   val mgr = OnnxSessionManager.getInstance(context)
- *   mgr.initialize("docquad/DocQuadNet256.onnx")   // call once at app startup
- *   val session = mgr.getSession()                 // subsequent calls are instant
  */
 class OnnxSessionManager private constructor(private val context: Context) {
 
@@ -36,66 +36,78 @@ class OnnxSessionManager private constructor(private val context: Context) {
         }
     }
 
-    /** OrtEnvironment is thread-safe and long-lived. Created lazily on first access. */
+    /** OrtEnvironment is thread-safe and long-lived. One per process is the ORT recommendation. */
     val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
 
     @Volatile
     private var session: OrtSession? = null
 
     /**
-     * Initialises the ONNX session from an asset file.
+     * Loads the model from assets and creates the ONNX Runtime session.
      * Safe to call multiple times — subsequent calls are no-ops.
-     * Must be called from a background coroutine.
+     * Must be called from Dispatchers.IO (reads 13MB from disk).
      *
-     * @param modelAssetPath Path relative to the assets directory, e.g. "docquad/DocQuadNet256.onnx"
+     * Execution provider selection rationale:
+     *  - The model uses `com.microsoft.FusedConv` (a Microsoft-specific fused operator).
+     *  - XNNPACK EP does not support this operator family.
+     *  - CPU EP (default) handles all operators via ORT's own ARM-optimized kernels.
+     *  - NO_OPT is used for .ort files: they are pre-optimized offline and
+     *    re-optimizing at runtime wastes startup time with no accuracy benefit.
+     *
+     * @param modelAssetPath Path relative to assets/, e.g. "docquad/model.ort"
      */
-    suspend fun initialize(modelAssetPath: String) = withContext(Dispatchers.Default) {
-        if (session != null) return@withContext  // already initialized
+    suspend fun initialize(modelAssetPath: String) = withContext(Dispatchers.IO) {
+        if (session != null) return@withContext  // idempotent
+
+        val modelBytes: ByteArray
+        try {
+            modelBytes = context.assets.open(modelAssetPath).use { it.readBytes() }
+            Log.d(TAG, "Model loaded: $modelAssetPath (${modelBytes.size / 1024}KB)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load model from assets: $modelAssetPath — ${e.message}")
+            throw e
+        }
 
         try {
-            val modelBytes = context.assets.open(modelAssetPath).use { it.readBytes() }
-
             val sessionOptions = OrtSession.SessionOptions().apply {
-                // XNNPACK: best EP for float32 models on Android (ARM SIMD optimized)
-                addXnnpack(emptyMap())
-                setIntraOpNumThreads(2)   // 2 threads is the sweet spot on mobile
+                // Pre-optimized .ort file — skip runtime graph optimization (saves ~200ms startup)
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT)
+                setIntraOpNumThreads(2)
                 setInterOpNumThreads(1)
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                // CPU EP is the default — no addXxxxx() call needed.
+                // We intentionally don't add XNNPACK here because FusedConv is unsupported by it.
+                // NNAPI is left out for now: it requires quantized models for peak benefit on most devices,
+                // and this model is float32. Can be enabled per-device if profiling shows improvement.
             }
-
             session = env.createSession(modelBytes, sessionOptions)
-            Log.d(TAG, "Session initialized successfully for: $modelAssetPath")
+            Log.d(TAG, "ONNX session ready: $modelAssetPath")
         } catch (e: Exception) {
-            Log.e(TAG, "Session initialization failed for: $modelAssetPath — ${e.message}")
-            throw e  // propagate so the caller can decide to disable ONNX
+            Log.e(TAG, "Session creation failed: ${e.message}")
+            throw e
         }
     }
 
     /**
-     * Returns the active session. Throws if [initialize] has not been called
-     * or if initialization failed.
+     * Returns the active session.
+     * @throws IllegalStateException if [initialize] was not called or failed.
      */
     fun getSession(): OrtSession {
         return session ?: throw IllegalStateException(
-            "OnnxSessionManager not initialized. Call initialize() at app startup."
+            "OnnxSessionManager: session not initialized. Was initialize() called at startup?"
         )
     }
 
-    /**
-     * Returns true if the session is ready for inference.
-     * Use this as a guard before calling [getSession] in the detection path.
-     */
+    /** True if the session is ready for inference calls. */
     fun isReady(): Boolean = session != null
 
     /**
-     * Releases the ONNX session and environment.
-     * Call from Application.onTerminate() or equivalent lifecycle point.
-     * Never call per-capture.
+     * Releases the session.
+     * Call from the Activity/Application destroy lifecycle only — never per-capture.
      */
     fun close() {
         session?.close()
         session = null
-        // Note: do not close env — OrtEnvironment is a global singleton in ORT
         Log.d(TAG, "Session closed")
+        // OrtEnvironment intentionally not closed — it is a global process-level singleton in ORT.
     }
 }

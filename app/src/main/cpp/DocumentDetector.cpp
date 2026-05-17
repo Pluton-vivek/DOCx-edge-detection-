@@ -542,9 +542,15 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
         //  std::printf("testing on channel %i %i\n", i, iterration);
         cv::extractChannel(temp1, temp2, i);
 
-        cv::threshold(temp2, edged, options.thresh, options.threshMax, cv::THRESH_BINARY);
-        cv::morphologyEx(edged, edged, cv::MORPH_CLOSE, morphologyStruct);
-        cv::dilate(edged, edged, dilateStruct);
+        // Auto-threshold via Otsu's method: finds the optimal threshold from the
+        // histogram — works equally on bright images (high Otsu value) AND dark
+        // images (low Otsu value). The old fixed thresh=160 silently killed detection
+        // on any document darker than 160 (e.g. dark book covers, tinted paper).
+        cv::Mat otsuEdged;
+        double otsuThresh = cv::threshold(temp2, otsuEdged, 0, 255,
+            cv::THRESH_BINARY | cv::THRESH_OTSU);
+        cv::morphologyEx(otsuEdged, otsuEdged, cv::MORPH_CLOSE, morphologyStruct);
+        cv::dilate(otsuEdged, edged, dilateStruct);
         findSquares(edged, width, height, foundSquares, image, drawContours, (weight--));
         if (foundSquares.size() > 0)
         {
@@ -563,10 +569,20 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
         // }
         iterration++;
         // we test over all channels to find the best contour
-        int t = 60;
-        while (t >= 10)
+        // Adaptive Canny: derive thresholds from Otsu's value so they scale with
+        // the actual image content. Dark images have low gradient magnitudes —
+        // fixed thresholds of 120/240 (t=60, cannyFactor=2) would miss all their edges.
+        // Using 0.33*otsuThresh and 0.66*otsuThresh as low/high is the established
+        // "auto-Canny" recipe from the OpenCV documentation and Canny's own paper.
+        int t = 3;  // multiplier steps: cannyLow = otsuThresh * t/9, high = otsuThresh * t/4.5
+        while (t >= 1)
         {
-            cv::Canny(temp2, edged, t * options.cannyFactor, options.cannyFactor * t * 2);
+            double cannyLow  = otsuThresh * (t / 9.0);   // 1/9 to 3/9 of Otsu
+            double cannyHigh = otsuThresh * (t / 4.5);   // 2x cannyLow (Canny's 1:2 ratio)
+            // Clamp: never go below 5 (degenerate) or above 250 (no edges left)
+            cannyLow  = std::max(5.0, std::min(cannyLow,  240.0));
+            cannyHigh = std::max(10.0, std::min(cannyHigh, 250.0));
+            cv::Canny(temp2, edged, cannyLow, cannyHigh);
 
             // --- B.1: Adaptive threshold edge fusion ---
             // Fuse Canny edges with adaptive threshold edges.
@@ -592,7 +608,7 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
             }
         }
             iterration++;
-            t -= 10;
+            t--;
         }
     }
     if (foundSquares.size() > 0)

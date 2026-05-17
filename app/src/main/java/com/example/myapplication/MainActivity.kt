@@ -46,14 +46,15 @@ class MainActivity : ComponentActivity() {
         }
 
         // Initialize ONNX session in the background — never blocks the main thread.
+        // Uses Dispatchers.IO because the init reads ~13MB from assets (disk I/O bound).
         // The capture path checks OnnxSessionManager.isReady() before using it,
-        // so the app works correctly even if the model file is not yet present.
-        lifecycleScope.launch(Dispatchers.Default) {
+        // so the app works correctly even if the model file fails to load.
+        lifecycleScope.launch(Dispatchers.IO) {
             try {
                 OnnxSessionManager.getInstance(applicationContext)
-                    .initialize("docquad/DocQuadNet256.onnx")
+                    .initialize("docquad/docquadnet256_trained_opset17.ort")
             } catch (e: Exception) {
-                Log.w("MainActivity", "ONNX init failed — app will use OpenCV-only detection: ${e.message}")
+                Log.w("MainActivity", "ONNX init failed — using OpenCV-only detection: ${e.message}")
             }
         }
 

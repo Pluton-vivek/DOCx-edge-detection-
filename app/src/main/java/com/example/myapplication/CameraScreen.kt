@@ -32,8 +32,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.os.Handler
+import android.os.Looper
 import java.util.concurrent.Executors
-import kotlin.math.max
 
 // Data class to represent the points from the JSON
 data class PointF(val x: Float, val y: Float)
@@ -49,6 +50,8 @@ fun CameraScreen(
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     var detectedPoints by remember { mutableStateOf<List<PointF>?>(null) }
     var imageBounds by remember { mutableStateOf(android.util.Size(1, 1)) }
+    // Guard: prevents double-tap capture and shows loading state during background detection
+    var isCapturing by remember { mutableStateOf(false) }
 
     val imageCapture = remember {
         ImageCapture.Builder()
@@ -81,15 +84,18 @@ fun CameraScreen(
                     .build()
                     .also {
                         it.setAnalyzer(cameraExecutor) { imageProxy ->
-                            // Update the tracked image resolution to map coordinates later
+                            // Track rotated frame dimensions for overlay math
                             val rotation = imageProxy.imageInfo.rotationDegrees
                             val isPortrait = rotation == 90 || rotation == 270
                             val w = if (isPortrait) imageProxy.height else imageProxy.width
                             val h = if (isPortrait) imageProxy.width else imageProxy.height
-                            imageBounds = android.util.Size(w, h)
 
                             processImageProxy(imageProxy) { points ->
-                                detectedPoints = points
+                                // BOTH state updates must land on the main thread.
+                                Handler(Looper.getMainLooper()).post {
+                                    imageBounds = android.util.Size(w, h)
+                                    detectedPoints = points
+                                }
                             }
                         }
                     }
@@ -140,33 +146,32 @@ fun CameraScreen(
 
         // Shutter Button
         Button(
+            enabled = !isCapturing,
             onClick = {
+                if (isCapturing) return@Button
+                isCapturing = true
                 imageCapture.takePicture(
                     ContextCompat.getMainExecutor(context),
                     object : ImageCapture.OnImageCapturedCallback() {
                         override fun onCaptureSuccess(image: ImageProxy) {
-                            val bitmap = image.toBitmap()
+                            val raw = image.toBitmap()
                             val rotation = image.imageInfo.rotationDegrees
                             image.close()
 
-                            // Rotate bitmap so the user sees it upright
-                            val matrix = android.graphics.Matrix().apply {
-                                postRotate(rotation.toFloat())
-                            }
+                            // Rotate to upright orientation
+                            val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
                             val rotatedBitmap = Bitmap.createBitmap(
-                                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                                raw, 0, 0, raw.width, raw.height, matrix, true
                             )
+                            // raw is no longer needed — release to avoid holding two full-res bitmaps
+                            if (rotatedBitmap !== raw) raw.recycle()
 
-                            // Hybrid detection on the ACTUAL captured bitmap:
-                            //   Step 1 — OpenCV (fast baseline, runs in C++)
-                            //   Step 2 — ONNX via DocQuadNet256 (ML refinement)
-                            //   Step 3 — HybridDetectionCoordinator picks the best result
                             coroutineScope.launch(Dispatchers.Default) {
                                 // Step 1: OpenCV on captured bitmap
                                 val pointsJson = DocumentProcessor.nativeScanJSON(
                                     srcBitmap = rotatedBitmap,
                                     shrunkImageHeight = 500,
-                                    imageRotation = 0, // already rotated
+                                    imageRotation = 0,
                                     scale = 1.0,
                                     options = "{}"
                                 )
@@ -174,14 +179,13 @@ fun CameraScreen(
                                     pointsJson, rotatedBitmap.width, rotatedBitmap.height
                                 )
 
-                                // Step 2 + 3: Hybrid decision (ONNX if ready, else OpenCV fallback)
+                                // Step 2 + 3: Hybrid decision
                                 val finalPoints: List<PointF>? = try {
                                     val sessionMgr = OnnxSessionManager.getInstance(context)
                                     if (sessionMgr.isReady()) {
                                         val detector = DocQuadNetDetector(sessionMgr)
                                         val coordinator = HybridDetectionCoordinator(detector)
                                         val (quad, method) = coordinator.detect(rotatedBitmap, opencvPoints)
-                                        // Convert NormalizedQuad back to List<PointF> for CroppingScreen
                                         listOf(
                                             PointF(quad.topLeft.x,     quad.topLeft.y),
                                             PointF(quad.topRight.x,    quad.topRight.y),
@@ -189,22 +193,25 @@ fun CameraScreen(
                                             PointF(quad.bottomLeft.x,  quad.bottomLeft.y)
                                         )
                                     } else {
-                                        // ONNX not yet ready (model not downloaded / startup init pending)
                                         android.util.Log.d("CameraScreen", "ONNX not ready — using OPENCV_CONTOUR")
                                         opencvPoints
                                     }
                                 } catch (e: Exception) {
                                     android.util.Log.e("CameraScreen", "Hybrid detection error: ${e.message}")
-                                    opencvPoints  // graceful fallback
+                                    opencvPoints
                                 }
 
                                 withContext(Dispatchers.Main) {
+                                    // isCapturing is reset by the caller (MainActivity/AppState)
+                                    // when it transitions to CROPPING state. We do not reset it
+                                    // here so the loading overlay stays until navigation completes.
                                     onPhotoCaptured(rotatedBitmap, finalPoints)
                                 }
                             }
                         }
                         override fun onError(exception: ImageCaptureException) {
                             Log.e("CameraScreen", "Photo capture failed", exception)
+                            isCapturing = false
                         }
                     }
                 )
@@ -214,13 +221,26 @@ fun CameraScreen(
                 .padding(bottom = 32.dp),
             shape = CircleShape
         ) {
-            Text("Capture", modifier = Modifier.padding(16.dp))
+            Text(if (isCapturing) "Processing…" else "Capture",
+                modifier = Modifier.padding(16.dp))
+        }
+
+        // Loading overlay: shown while hybrid detection runs in the background
+        if (isCapturing) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = Color.White)
+            }
         }
     }
 }
 
-// Processes a live ImageAnalysis frame: runs OpenCV and returns pixel-space points.
-// The returned points are in the *rotated* image's pixel space (imageBounds).
+// Processes a live ImageAnalysis frame: runs OpenCV, returns pixel-space points.
+// Called on cameraExecutor (background thread). Never touch Compose state here.
 private fun processImageProxy(imageProxy: ImageProxy, onPointsDetected: (List<PointF>?) -> Unit) {
     val bitmap = imageProxy.toBitmap()
     val rotation = imageProxy.imageInfo.rotationDegrees
@@ -232,11 +252,24 @@ private fun processImageProxy(imageProxy: ImageProxy, onPointsDetected: (List<Po
             scale = 1.0,
             options = "{}"
         )
-        onPointsDetected(parsePixelPoints(pointsJson))
+        val points = parsePixelPoints(pointsJson)
+        // LiveDetect tag: filter Logcat by 'LiveDetect' to debug detection without noise.
+        // Comment out in release builds.
+        if (points != null) {
+            Log.d("LiveDetect", "✓ found quad " +
+                "TL=(${points[0].x.toInt()},${points[0].y.toInt()}) " +
+                "TR=(${points[1].x.toInt()},${points[1].y.toInt()}) " +
+                "BR=(${points[2].x.toInt()},${points[2].y.toInt()}) " +
+                "BL=(${points[3].x.toInt()},${points[3].y.toInt()})")
+        } else {
+            Log.v("LiveDetect", "✗ no quad found")
+        }
+        onPointsDetected(points)
     } catch (e: Exception) {
         Log.e("CameraScreen", "Live frame detection error", e)
         onPointsDetected(null)
     } finally {
+        bitmap.recycle()   // live frames are decoded fresh every ~100ms — always recycle
         imageProxy.close()
     }
 }

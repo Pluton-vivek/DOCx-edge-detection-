@@ -9,10 +9,9 @@ include_directories(include)
 find_library(log-lib log)
 find_library(jnigraphics-lib jnigraphics)
 
-# Import OpenCV
-set(OpenCV_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../sdk/native/jni)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../../sdk/native/jni/include)
-find_package(OpenCV REQUIRED java)
+# Import OpenCV via Prefab (AAR)
+find_package(OpenCV REQUIRED CONFIG)
+# The prefab AAR exposes target opencv::opencv_java (or OpenCV::opencv_java4, we will try opencv::opencv_java first)
 
 # Add our source files
 add_library(
@@ -32,7 +31,7 @@ add_library(
 # Link the libraries together
 target_link_libraries(
         document_detector
-        ${OpenCV_LIBS}
+        OpenCV::opencv_java4
         ${log-lib}
         ${jnigraphics-lib}
 )

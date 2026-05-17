@@ -43,6 +43,7 @@ android {
     }
     buildFeatures {
         compose = true
+        prefab = true
     }
     
     externalNativeBuild {
@@ -69,7 +70,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
-    implementation(project(":sdk"))
+    implementation("org.opencv:opencv:4.13.0")
 
     // CameraX
     val camerax_version = "1.3.3"

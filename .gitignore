@@ -47,3 +47,7 @@ lint-baseline.xml
 .DS_Store
 Thumbs.db
 sdk
+.claude
+.github
+docs
+*.md

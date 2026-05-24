@@ -2,7 +2,11 @@ package com.example.myapplication
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -59,6 +63,99 @@ fun CameraScreen(
             .build()
     }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    // Photo Picker launcher — no storage permission required (Android 13+ Photo Picker API).
+    // On older devices the system falls back to the legacy file picker.
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null || isCapturing) return@rememberLauncherForActivityResult
+        isCapturing = true
+
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                // Step 1: Decode with size cap to avoid OOM on 12MP+ photos
+                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                context.contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, opts)
+                }
+                var sampleSize = 1
+                while (maxOf(opts.outWidth, opts.outHeight) / sampleSize > 2048) {
+                    sampleSize *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                val rawBitmap = context.contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, decodeOpts)
+                } ?: throw IllegalStateException("Could not decode bitmap from URI")
+
+                // Step 2: Apply EXIF rotation so portrait photos are never sideways
+                val exifRotation = context.contentResolver.openInputStream(uri)?.use { stream ->
+                    val exif = androidx.exifinterface.media.ExifInterface(stream)
+                    when (exif.getAttributeInt(
+                        androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                        androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+                    )) {
+                        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90  -> 90f
+                        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                        else -> 0f
+                    }
+                } ?: 0f
+
+                val bitmap = if (exifRotation != 0f) {
+                    val matrix = android.graphics.Matrix().apply { postRotate(exifRotation) }
+                    Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+                        .also { if (it !== rawBitmap) rawBitmap.recycle() }
+                } else rawBitmap
+
+                // Step 3: Run OpenCV on the gallery bitmap.
+                // imageRotation = 0 because EXIF rotation has already been applied above.
+                val pointsJson = DocumentProcessor.nativeScanJSON(
+                    srcBitmap = bitmap,
+                    shrunkImageHeight = 500,
+                    imageRotation = 0,
+                    scale = 1.0,
+                    options = "{}"
+                )
+                val opencvPoints = parseAndNormalizePoints(
+                    pointsJson, bitmap.width, bitmap.height
+                )
+
+                // Step 4: Run hybrid detection — identical logic to the camera capture path.
+                val finalPoints: List<PointF>? = try {
+                    val sessionMgr = OnnxSessionManager.getInstance(context)
+                    if (sessionMgr.isReady()) {
+                        val detector = DocQuadNetDetector(sessionMgr)
+                        val coordinator = HybridDetectionCoordinator(detector)
+                        val (quad, method) = coordinator.detect(bitmap, opencvPoints)
+                        listOf(
+                            PointF(quad.topLeft.x,     quad.topLeft.y),
+                            PointF(quad.topRight.x,    quad.topRight.y),
+                            PointF(quad.bottomRight.x, quad.bottomRight.y),
+                            PointF(quad.bottomLeft.x,  quad.bottomLeft.y)
+                        )
+                    } else opencvPoints
+                } catch (e: Exception) {
+                    android.util.Log.e("GalleryImport", "Hybrid detection error: ${e.message}")
+                    opencvPoints
+                }
+
+                // Step 5: Hand off to MainActivity via the same callback as camera capture.
+                // isCapturing is reset when the AppState transitions to CROPPING.
+                withContext(Dispatchers.Main) {
+                    onPhotoCaptured(bitmap, finalPoints)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("GalleryImport", "Gallery processing failed: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    isCapturing = false
+                }
+            }
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
@@ -144,85 +241,104 @@ fun CameraScreen(
             }
         }
 
-        // Shutter Button
-        Button(
-            enabled = !isCapturing,
-            onClick = {
-                if (isCapturing) return@Button
-                isCapturing = true
-                imageCapture.takePicture(
-                    ContextCompat.getMainExecutor(context),
-                    object : ImageCapture.OnImageCapturedCallback() {
-                        override fun onCaptureSuccess(image: ImageProxy) {
-                            val raw = image.toBitmap()
-                            val rotation = image.imageInfo.rotationDegrees
-                            image.close()
-
-                            // Rotate to upright orientation
-                            val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
-                            val rotatedBitmap = Bitmap.createBitmap(
-                                raw, 0, 0, raw.width, raw.height, matrix, true
-                            )
-                            // raw is no longer needed — release to avoid holding two full-res bitmaps
-                            if (rotatedBitmap !== raw) raw.recycle()
-
-                            coroutineScope.launch(Dispatchers.Default) {
-                                // Step 1: OpenCV on captured bitmap
-                                val pointsJson = DocumentProcessor.nativeScanJSON(
-                                    srcBitmap = rotatedBitmap,
-                                    shrunkImageHeight = 500,
-                                    imageRotation = 0,
-                                    scale = 1.0,
-                                    options = "{}"
-                                )
-                                val opencvPoints = parseAndNormalizePoints(
-                                    pointsJson, rotatedBitmap.width, rotatedBitmap.height
-                                )
-
-                                // Step 2 + 3: Hybrid decision
-                                val finalPoints: List<PointF>? = try {
-                                    val sessionMgr = OnnxSessionManager.getInstance(context)
-                                    if (sessionMgr.isReady()) {
-                                        val detector = DocQuadNetDetector(sessionMgr)
-                                        val coordinator = HybridDetectionCoordinator(detector)
-                                        val (quad, method) = coordinator.detect(rotatedBitmap, opencvPoints)
-                                        listOf(
-                                            PointF(quad.topLeft.x,     quad.topLeft.y),
-                                            PointF(quad.topRight.x,    quad.topRight.y),
-                                            PointF(quad.bottomRight.x, quad.bottomRight.y),
-                                            PointF(quad.bottomLeft.x,  quad.bottomLeft.y)
-                                        )
-                                    } else {
-                                        android.util.Log.d("CameraScreen", "ONNX not ready — using OPENCV_CONTOUR")
-                                        opencvPoints
-                                    }
-                                } catch (e: Exception) {
-                                    android.util.Log.e("CameraScreen", "Hybrid detection error: ${e.message}")
-                                    opencvPoints
-                                }
-
-                                withContext(Dispatchers.Main) {
-                                    // isCapturing is reset by the caller (MainActivity/AppState)
-                                    // when it transitions to CROPPING state. We do not reset it
-                                    // here so the loading overlay stays until navigation completes.
-                                    onPhotoCaptured(rotatedBitmap, finalPoints)
-                                }
-                            }
-                        }
-                        override fun onError(exception: ImageCaptureException) {
-                            Log.e("CameraScreen", "Photo capture failed", exception)
-                            isCapturing = false
-                        }
-                    }
-                )
-            },
+        // Bottom control row: Gallery button (left) + Shutter button (right)
+        Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp),
-            shape = CircleShape
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(if (isCapturing) "Processing…" else "Capture",
-                modifier = Modifier.padding(16.dp))
+            // Gallery button — launches the system Photo Picker (no storage permission needed)
+            Button(
+                enabled = !isCapturing,
+                onClick = {
+                    galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                shape = CircleShape
+            ) {
+                Text("Gallery", modifier = Modifier.padding(12.dp))
+            }
+
+            // Shutter button — unchanged logic
+            Button(
+                enabled = !isCapturing,
+                onClick = {
+                    if (isCapturing) return@Button
+                    isCapturing = true
+                    imageCapture.takePicture(
+                        ContextCompat.getMainExecutor(context),
+                        object : ImageCapture.OnImageCapturedCallback() {
+                            override fun onCaptureSuccess(image: ImageProxy) {
+                                val raw = image.toBitmap()
+                                val rotation = image.imageInfo.rotationDegrees
+                                image.close()
+
+                                // Rotate to upright orientation
+                                val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+                                val rotatedBitmap = Bitmap.createBitmap(
+                                    raw, 0, 0, raw.width, raw.height, matrix, true
+                                )
+                                // raw is no longer needed — release to avoid holding two full-res bitmaps
+                                if (rotatedBitmap !== raw) raw.recycle()
+
+                                coroutineScope.launch(Dispatchers.Default) {
+                                    // Step 1: OpenCV on captured bitmap
+                                    val pointsJson = DocumentProcessor.nativeScanJSON(
+                                        srcBitmap = rotatedBitmap,
+                                        shrunkImageHeight = 500,
+                                        imageRotation = 0,
+                                        scale = 1.0,
+                                        options = "{}"
+                                    )
+                                    val opencvPoints = parseAndNormalizePoints(
+                                        pointsJson, rotatedBitmap.width, rotatedBitmap.height
+                                    )
+
+                                    // Step 2 + 3: Hybrid decision
+                                    val finalPoints: List<PointF>? = try {
+                                        val sessionMgr = OnnxSessionManager.getInstance(context)
+                                        if (sessionMgr.isReady()) {
+                                            val detector = DocQuadNetDetector(sessionMgr)
+                                            val coordinator = HybridDetectionCoordinator(detector)
+                                            val (quad, method) = coordinator.detect(rotatedBitmap, opencvPoints)
+                                            listOf(
+                                                PointF(quad.topLeft.x,     quad.topLeft.y),
+                                                PointF(quad.topRight.x,    quad.topRight.y),
+                                                PointF(quad.bottomRight.x, quad.bottomRight.y),
+                                                PointF(quad.bottomLeft.x,  quad.bottomLeft.y)
+                                            )
+                                        } else {
+                                            android.util.Log.d("CameraScreen", "ONNX not ready — using OPENCV_CONTOUR")
+                                            opencvPoints
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("CameraScreen", "Hybrid detection error: ${e.message}")
+                                        opencvPoints
+                                    }
+
+                                    withContext(Dispatchers.Main) {
+                                        // isCapturing is reset by the caller (MainActivity/AppState)
+                                        // when it transitions to CROPPING state. We do not reset it
+                                        // here so the loading overlay stays until navigation completes.
+                                        onPhotoCaptured(rotatedBitmap, finalPoints)
+                                    }
+                                }
+                            }
+                            override fun onError(exception: ImageCaptureException) {
+                                Log.e("CameraScreen", "Photo capture failed", exception)
+                                isCapturing = false
+                            }
+                        }
+                    )
+                },
+                shape = CircleShape
+            ) {
+                Text(if (isCapturing) "Processing…" else "Capture",
+                    modifier = Modifier.padding(16.dp))
+            }
         }
 
         // Loading overlay: shown while hybrid detection runs in the background

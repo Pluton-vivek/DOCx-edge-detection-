@@ -15,7 +15,8 @@ data class NormalizedQuad(
     val topRight:    NormalizedPoint,
     val bottomRight: NormalizedPoint,
     val bottomLeft:  NormalizedPoint,
-    val confidence:  Float
+    val confidence:  Float,
+    val maskScore:   Float = 0f    // mean sigmoid of mask_logits within quad region
 )
 
 /**

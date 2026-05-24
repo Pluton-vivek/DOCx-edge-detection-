@@ -13,19 +13,21 @@ private const val TAG = "HybridCoordinator"
  * (from [DocQuadNetDetector]) and returns the best quad with its [DetectionMethod].
  *
  * Decision priority:
- *  1. ONNX result, if confidence ≥ [onnxConfidenceThreshold]  → ONNX_REFINED
- *  2. OpenCV result, if provided                              → OPENCV_CONTOUR
- *  3. Full-frame quad with 5% margin                         → MANUAL_FALLBACK
+ *  1. ONNX result, if confidence ≥ [onnxConfidenceThreshold] AND mask ≥ [maskScoreThreshold]  → ONNX_REFINED
+ *  2. OpenCV result, if provided                                                               → OPENCV_CONTOUR
+ *  3. Full-frame quad with 5% margin                                                           → MANUAL_FALLBACK
  *
  * Usage (capture path only — never on live viewfinder frames):
  *   val result = coordinator.detect(rotatedBitmap, opencvRelativePoints)
  *
  * @param onnxDetector The ONNX inference engine (session already initialized).
  * @param onnxConfidenceThreshold Minimum ONNX confidence to trust the result (default 0.65).
+ * @param maskScoreThreshold Minimum mean-sigmoid mask score to trust the result (default 0.35).
  */
 class HybridDetectionCoordinator(
     private val onnxDetector: DocQuadNetDetector,
-    private val onnxConfidenceThreshold: Float = 0.65f
+    private val onnxConfidenceThreshold: Float = 0.65f,
+    private val maskScoreThreshold: Float = 0.35f
 ) {
     /**
      * Runs the full hybrid detection flow on a captured (already-rotated) bitmap.
@@ -49,13 +51,24 @@ class HybridDetectionCoordinator(
 
         // --- Step 2: Decision logic ---
         when {
-            onnxQuad != null && onnxQuad.confidence >= onnxConfidenceThreshold -> {
-                Log.d(TAG, "ONNX_REFINED (confidence=${onnxQuad.confidence})")
+            onnxQuad != null
+            && onnxQuad.confidence >= onnxConfidenceThreshold
+            && onnxQuad.maskScore  >= maskScoreThreshold -> {
+                Log.d(TAG, "ONNX_REFINED " +
+                    "conf=${onnxQuad.confidence}  " +
+                    "mask=${onnxQuad.maskScore}  " +
+                    "threshold_conf=${onnxConfidenceThreshold}  " +
+                    "threshold_mask=${maskScoreThreshold}")
                 Pair(onnxQuad, DetectionMethod.ONNX_REFINED)
             }
 
             opencvPoints != null && opencvPoints.size == 4 -> {
-                Log.d(TAG, "OPENCV_CONTOUR (ONNX confidence=${onnxQuad?.confidence ?: "n/a"})")
+                Log.d(TAG, "OPENCV_CONTOUR — " +
+                    "onnx_conf=${onnxQuad?.confidence ?: "null"}  " +
+                    "onnx_mask=${onnxQuad?.maskScore ?: "null"}  " +
+                    "reason=${if (onnxQuad == null) "onnx_failed"
+                              else if (onnxQuad.confidence < onnxConfidenceThreshold) "low_confidence"
+                              else "low_mask_score"}")
                 val quad = NormalizedQuad(
                     topLeft     = NormalizedPoint(opencvPoints[0].x, opencvPoints[0].y),
                     topRight    = NormalizedPoint(opencvPoints[1].x, opencvPoints[1].y),
@@ -67,7 +80,8 @@ class HybridDetectionCoordinator(
             }
 
             else -> {
-                Log.d(TAG, "MANUAL_FALLBACK (both detectors returned nothing)")
+                Log.d(TAG, "MANUAL_FALLBACK — onnx_conf=${onnxQuad?.confidence ?: "null"}  " +
+                    "onnx_mask=${onnxQuad?.maskScore ?: "null"}")
                 Pair(fullFrameQuad(), DetectionMethod.MANUAL_FALLBACK)
             }
         }

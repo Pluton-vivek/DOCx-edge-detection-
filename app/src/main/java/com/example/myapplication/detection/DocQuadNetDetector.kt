@@ -41,8 +41,7 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
         // Tensor names — must match the model. Verified in Netron by user.
         private const val INPUT_NAME  = "input"
         private const val HEATMAP_OUT = "corner_heatmaps"
-        // "mask_logits" is the second output; we ignore it but ORT will still compute it.
-        // In a future optimization, pass output_names to session.run() to skip mask_logits.
+        private const val MASK_OUT    = "mask_logits"
     }
 
     /**
@@ -94,6 +93,7 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
         // After that copy, the JVM array is independent of native memory.
         // Then close the Result safely.
         val heatmapRaw: Array<Array<Array<FloatArray>>>?
+        var maskRaw: Array<Array<Array<FloatArray>>>? = null
         try {
             val heatmapOpt = outputResult.get(HEATMAP_OUT)
             if (heatmapOpt == null || !heatmapOpt.isPresent) {
@@ -104,8 +104,15 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
             // .value copies native float data → JVM array. Must happen BEFORE close().
             @Suppress("UNCHECKED_CAST")
             heatmapRaw = heatmapOpt.get().value as? Array<Array<Array<FloatArray>>>
+
+            // Read mask_logits — must happen before outputResult.close()
+            val maskOpt = outputResult.get(MASK_OUT)
+            if (maskOpt != null && maskOpt.isPresent) {
+                @Suppress("UNCHECKED_CAST")
+                maskRaw = maskOpt.get().value as? Array<Array<Array<FloatArray>>>
+            }
         } finally {
-            // Safe to close now: the JVM array above is already a copy of the native data.
+            // Safe to close now: all JVM arrays above are already copies of native data.
             outputResult.close()
         }
 
@@ -133,7 +140,9 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
         }
 
         val confidence = computeConfidence(heatmaps, heatmapH, heatmapW)
-        Log.d(TAG, "conf=${confidence.format()}  TL=${corners[0].fmt()}  TR=${corners[1].fmt()}  " +
+        val maskScore  = computeMaskScore(maskRaw, corners, heatmapH, heatmapW)
+        Log.d(TAG, "maskScore=${maskScore.format()}  conf=${confidence.format()}  " +
+                   "TL=${corners[0].fmt()}  TR=${corners[1].fmt()}  " +
                    "BR=${corners[2].fmt()}  BL=${corners[3].fmt()}")
 
         NormalizedQuad(
@@ -141,7 +150,8 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
             topRight    = corners[1],
             bottomRight = corners[2],
             bottomLeft  = corners[3],
-            confidence  = confidence
+            confidence  = confidence,
+            maskScore   = maskScore
         )
     }
 
@@ -215,6 +225,42 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
         val imageY = (preScaledY * preScaleRatio).coerceIn(0f, origH.toFloat())
 
         return NormalizedPoint(imageX / origW, imageY / origH)
+    }
+
+    /**
+     * Computes the mean sigmoid of [mask_logits] values within the bounding box
+     * of the detected quad, as a proxy for "does this region look like a document?"
+     *
+     * Uses normalized corner coordinates mapped to heatmap space (approximate but
+     * sufficient for a validation gate).
+     */
+    private fun computeMaskScore(
+        maskRaw: Array<Array<Array<FloatArray>>>?,
+        corners: Array<NormalizedPoint>,
+        heatmapH: Int,
+        heatmapW: Int
+    ): Float {
+        if (maskRaw == null) return 0f
+        val mask = maskRaw[0][0]  // shape [heatmapH][heatmapW]
+
+        // Map corner normalized coords to heatmap space (approximate but sufficient)
+        val colCoords = corners.map { it.x * heatmapW }
+        val rowCoords = corners.map { it.y * heatmapH }
+        val minCol = colCoords.min().toInt().coerceIn(0, heatmapW - 1)
+        val maxCol = colCoords.max().toInt().coerceIn(0, heatmapW - 1)
+        val minRow = rowCoords.min().toInt().coerceIn(0, heatmapH - 1)
+        val maxRow = rowCoords.max().toInt().coerceIn(0, heatmapH - 1)
+
+        // Mean sigmoid within bounding box of detected quad
+        var sum = 0f
+        var count = 0
+        for (r in minRow..maxRow) {
+            for (c in minCol..maxCol) {
+                sum += sigmoid(mask[r][c])
+                count++
+            }
+        }
+        return if (count > 0) sum / count else 0f
     }
 
     /** Sigmoid of mean peak activation across all 4 corner heatmaps. */

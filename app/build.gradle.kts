@@ -95,5 +95,9 @@ dependencies {
     
     // GSON for parsing JSON points returned by C++
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // ExifInterface: reads EXIF rotation tag from gallery-picked images so they
+    // appear correctly oriented in CroppingScreen (no storage permission required).
+    implementation("androidx.exifinterface:exifinterface:1.4.2")
 }
 

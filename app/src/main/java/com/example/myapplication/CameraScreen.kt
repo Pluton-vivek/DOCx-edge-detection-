@@ -57,11 +57,6 @@ fun CameraScreen(
     // Guard: prevents double-tap capture and shows loading state during background detection
     var isCapturing by remember { mutableStateOf(false) }
 
-    // Rolling buffer of recent detections for temporal smoothing.
-    // ArrayDeque is used as a FIFO queue — oldest at front, newest at back.
-    // Accessed only in Handler(Looper.getMainLooper()).post blocks — no sync needed.
-    val detectionBuffer = remember { ArrayDeque<List<PointF>>() }
-
     val imageCapture = remember {
         ImageCapture.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_16_9)
@@ -196,27 +191,7 @@ fun CameraScreen(
                                 // BOTH state updates must land on the main thread.
                                 Handler(Looper.getMainLooper()).post {
                                     imageBounds = android.util.Size(w, h)
-
-                                    // Update buffer and compute smoothed result
-                                    updateDetectionBuffer(detectionBuffer, points)
-
-                                    val smoothed = if (detectionBuffer.isNotEmpty()) {
-                                        computeSmoothedPoints(detectionBuffer)
-                                    } else {
-                                        null
-                                    }
-
-                                    // Only trigger recomposition if the overlay actually moved enough to matter.
-                                    // This eliminates sub-pixel jitter and reduces unnecessary redraws.
-                                    val shouldUpdate = when {
-                                        smoothed == null && detectedPoints == null -> false  // both null — no change
-                                        smoothed == null || detectedPoints == null -> true   // appeared or disappeared
-                                        else -> hasSignificantChange(smoothed, detectedPoints!!)
-                                    }
-
-                                    if (shouldUpdate) {
-                                        detectedPoints = smoothed
-                                    }
+                                    detectedPoints = points
                                 }
                             }
                         }
@@ -436,52 +411,5 @@ private fun parsePixelPoints(pointsJson: String?): List<PointF>? {
     } catch (e: Exception) {
         Log.e("CameraScreen", "Error parsing detection JSON", e)
         null
-    }
-}
-
-// Computes a linearly-weighted average of buffered detection quads.
-// More recent entries have higher weight (index 0 = oldest, index n-1 = newest).
-private fun computeSmoothedPoints(buffer: ArrayDeque<List<PointF>>): List<PointF> {
-    val n = buffer.size
-    val totalWeight = (n * (n + 1)) / 2f
-    return (0..3).map { cornerIdx ->
-        var weightedX = 0f
-        var weightedY = 0f
-        buffer.forEachIndexed { bufIdx, pts ->
-            val weight = (bufIdx + 1) / totalWeight
-            weightedX += pts[cornerIdx].x * weight
-            weightedY += pts[cornerIdx].y * weight
-        }
-        PointF(weightedX, weightedY)
-    }
-}
-
-// Returns true if any corner moved more than [threshold] (in normalized coords).
-// threshold = 0.005f ≈ 5px on a 1000px-wide preview. Tune if needed.
-private fun hasSignificantChange(
-    a: List<PointF>,
-    b: List<PointF>,
-    threshold: Float = 0.005f
-): Boolean {
-    return a.zip(b).any { (pa, pb) ->
-        val dx = pa.x - pb.x
-        val dy = pa.y - pb.y
-        kotlin.math.sqrt((dx * dx + dy * dy).toDouble()) > threshold
-    }
-}
-
-// Adds a new detection to the buffer, maintaining max size.
-// If points is null (no detection), oldest entry is evicted without adding.
-private fun updateDetectionBuffer(
-    buffer: ArrayDeque<List<PointF>>,
-    points: List<PointF>?,
-    maxSize: Int = 6
-) {
-    if (points != null) {
-        buffer.addLast(points)
-        if (buffer.size > maxSize) buffer.removeFirst()
-    } else {
-        // Decay: gradually remove old detections when nothing is found
-        if (buffer.isNotEmpty()) buffer.removeFirst()
     }
 }

@@ -31,6 +31,8 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.example.myapplication.detection.DocQuadNetDetector
 import com.example.myapplication.detection.HybridDetectionCoordinator
+import com.example.myapplication.detection.MLSDDetector
+import com.example.myapplication.detection.MLSDSessionManager
 import com.example.myapplication.detection.OnnxSessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
@@ -129,7 +131,11 @@ fun CameraScreen(
                     val sessionMgr = OnnxSessionManager.getInstance(context)
                     if (sessionMgr.isReady()) {
                         val detector = DocQuadNetDetector(sessionMgr)
-                        val coordinator = HybridDetectionCoordinator(detector)
+                        val mlsdDetector = if (MLSDSessionManager.isReady()) MLSDDetector() else null
+                        val coordinator = HybridDetectionCoordinator(
+                            onnxDetector = detector,
+                            mlsdDetector = mlsdDetector
+                        )
                         val (quad, method) = coordinator.detect(bitmap, opencvPoints)
                         listOf(
                             PointF(quad.topLeft.x,     quad.topLeft.y),
@@ -302,7 +308,11 @@ fun CameraScreen(
                                         val sessionMgr = OnnxSessionManager.getInstance(context)
                                         if (sessionMgr.isReady()) {
                                             val detector = DocQuadNetDetector(sessionMgr)
-                                            val coordinator = HybridDetectionCoordinator(detector)
+                                            val mlsdDetector = if (MLSDSessionManager.isReady()) MLSDDetector() else null
+                                            val coordinator = HybridDetectionCoordinator(
+                                                onnxDetector = detector,
+                                                mlsdDetector = mlsdDetector
+                                            )
                                             val (quad, method) = coordinator.detect(rotatedBitmap, opencvPoints)
                                             listOf(
                                                 PointF(quad.topLeft.x,     quad.topLeft.y),

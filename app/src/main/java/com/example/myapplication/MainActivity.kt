@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.example.myapplication.detection.MLSDSessionManager
 import com.example.myapplication.detection.OnnxSessionManager
 import com.example.myapplication.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +56,14 @@ class MainActivity : ComponentActivity() {
                     .initialize("docquad/docquadnet256_trained_opset17.ort")
             } catch (e: Exception) {
                 Log.w("MainActivity", "ONNX init failed — using OpenCV-only detection: ${e.message}")
+            }
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                MLSDSessionManager.initialize(applicationContext)
+            } catch (e: Exception) {
+                Log.w("MainActivity", "M-LSD init failed: ${e.message}")
             }
         }
 

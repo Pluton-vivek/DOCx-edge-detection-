@@ -86,6 +86,9 @@ dependencies {
     // ONNX Runtime for ML Inference
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
 
+    // TFLite
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+
     // CameraX
     val camerax_version = "1.3.3"
     implementation("androidx.camera:camera-core:$camerax_version")

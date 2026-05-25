@@ -14,8 +14,9 @@ private const val TAG = "HybridCoordinator"
  *
  * Decision priority:
  *  1. ONNX result, if confidence ≥ [onnxConfidenceThreshold] AND mask ≥ [maskScoreThreshold]  → ONNX_REFINED
- *  2. OpenCV result, if provided                                                               → OPENCV_CONTOUR
- *  3. Full-frame quad with 5% margin                                                           → MANUAL_FALLBACK
+ *  2. M-LSD line detection, if ONNX was uncertain but lines form a quad                        → MLSD_LINES
+ *  3. OpenCV result, if provided                                                               → OPENCV_CONTOUR
+ *  4. Full-frame quad with 5% margin                                                           → MANUAL_FALLBACK
  *
  * Usage (capture path only — never on live viewfinder frames):
  *   val result = coordinator.detect(rotatedBitmap, opencvRelativePoints)
@@ -23,11 +24,13 @@ private const val TAG = "HybridCoordinator"
  * @param onnxDetector The ONNX inference engine (session already initialized).
  * @param onnxConfidenceThreshold Minimum ONNX confidence to trust the result (default 0.65).
  * @param maskScoreThreshold Minimum mean-sigmoid mask score to trust the result (default 0.35).
+ * @param mlsdDetector Optional M-LSD detector — null-safe if TFLite is not ready.
  */
 class HybridDetectionCoordinator(
     private val onnxDetector: DocQuadNetDetector,
     private val onnxConfidenceThreshold: Float = 0.65f,
-    private val maskScoreThreshold: Float = 0.35f
+    private val maskScoreThreshold: Float = 0.35f,
+    private val mlsdDetector: MLSDDetector? = null
 ) {
     /**
      * Runs the full hybrid detection flow on a captured (already-rotated) bitmap.
@@ -49,7 +52,20 @@ class HybridDetectionCoordinator(
             null
         }
 
-        // --- Step 2: Decision logic ---
+        // --- Step 2: M-LSD inference (only when ONNX is uncertain — saves ~30ms on happy path) ---
+        val mlsdQuad = if (
+            mlsdDetector != null &&
+            (onnxQuad == null || onnxQuad.confidence < onnxConfidenceThreshold)
+        ) {
+            try {
+                mlsdDetector.detect(bitmap)
+            } catch (e: Exception) {
+                Log.e(TAG, "M-LSD failed: ${e.message}")
+                null
+            }
+        } else null
+
+        // --- Step 3: Decision logic ---
         when {
             onnxQuad != null
             && onnxQuad.confidence >= onnxConfidenceThreshold
@@ -60,6 +76,11 @@ class HybridDetectionCoordinator(
                     "threshold_conf=${onnxConfidenceThreshold}  " +
                     "threshold_mask=${maskScoreThreshold}")
                 Pair(onnxQuad, DetectionMethod.ONNX_REFINED)
+            }
+
+            mlsdQuad != null -> {
+                Log.d(TAG, "MLSD_LINES conf=${mlsdQuad.confidence}")
+                Pair(mlsdQuad, DetectionMethod.MLSD_LINES)
             }
 
             opencvPoints != null && opencvPoints.size == 4 -> {

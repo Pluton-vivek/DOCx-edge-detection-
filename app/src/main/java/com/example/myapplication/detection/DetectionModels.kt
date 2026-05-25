@@ -26,5 +26,6 @@ data class NormalizedQuad(
 enum class DetectionMethod {
     OPENCV_CONTOUR,  // Classical C++ pipeline succeeded, ONNX not used or low-confidence
     ONNX_REFINED,    // ONNX model result used (confidence ≥ threshold)
+    MLSD_LINES,      // M-LSD line segment detection
     MANUAL_FALLBACK  // Both detectors returned nothing — full-frame quad shown to user
 }

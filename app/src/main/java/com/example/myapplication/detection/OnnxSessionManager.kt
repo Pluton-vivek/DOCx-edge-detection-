@@ -2,10 +2,12 @@ package com.example.myapplication.detection
 
 import android.content.Context
 import android.util.Log
+import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.FloatBuffer
 
 /**
  * Singleton that owns the ONNX Runtime environment and the DocQuadNet256 session.
@@ -81,6 +83,23 @@ class OnnxSessionManager private constructor(private val context: Context) {
             }
             session = env.createSession(modelBytes, sessionOptions)
             Log.d(TAG, "ONNX session ready: $modelAssetPath")
+
+            // Warm up the JIT — first inference is always slow (~400ms).
+            // Run a zero-filled dummy tensor so the runtime compiles kernels now,
+            // not during the first real capture. This runs on Dispatchers.IO
+            // (the existing background coroutine), so it has zero UI impact.
+            try {
+                val warmupBuffer = FloatBuffer.allocate(1 * 3 * 256 * 256)
+                val warmupTensor = OnnxTensor.createTensor(
+                    env, warmupBuffer,
+                    longArrayOf(1L, 3L, 256L, 256L)
+                )
+                session!!.run(mapOf("input" to warmupTensor)).close()
+                warmupTensor.close()
+                Log.d(TAG, "ONNX warm-up complete")
+            } catch (e: Exception) {
+                Log.w(TAG, "ONNX warm-up failed (non-fatal): ${e.message}")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Session creation failed: ${e.message}")
             throw e

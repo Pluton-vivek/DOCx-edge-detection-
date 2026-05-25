@@ -23,9 +23,10 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
      * Converts a Bitmap to the [1, 320, 320, 4] RGBA float32 ByteBuffer
      * expected by the model.
      *
-     * Normalization: (pixel_channel / 127.5f) - 1.0f  →  range [-1.0, 1.0]
-     * This matches the Div(127.5) → Sub(1.0) baked into the model input graph.
-     * We apply it in code here so the model graph's own ops are redundant but harmless.
+     * The model graph contains Div(127.5) → Sub(1.0) internally, so we
+     * feed RAW [0, 255] float values — no normalization in code.
+     * (Previous code normalized here too, causing double-normalization
+     * which collapsed all pixels to ~-1.0 and produced zero scores.)
      *
      * Channel order: R, G, B, A (RGBA)
      * Android Bitmap.getPixels returns 0xAARRGGBB — reorder to RGBA when filling buffer.
@@ -48,11 +49,11 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
             val g = ((pixel shr  8) and 0xFF).toFloat()
             val b = ( pixel         and 0xFF).toFloat()
             val a = ((pixel shr 24) and 0xFF).toFloat()
-            // Store RGBA in order, normalize each: (x / 127.5) - 1.0
-            buffer.putFloat(r / 127.5f - 1.0f)
-            buffer.putFloat(g / 127.5f - 1.0f)
-            buffer.putFloat(b / 127.5f - 1.0f)
-            buffer.putFloat(a / 127.5f - 1.0f)
+            // Feed raw [0, 255] — model handles normalization internally
+            buffer.putFloat(r)
+            buffer.putFloat(g)
+            buffer.putFloat(b)
+            buffer.putFloat(a)
         }
         buffer.rewind()
         return buffer
@@ -80,6 +81,11 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
 
         // Allocate output buffers matching verified shapes
         val output0Shape = interp.getOutputTensor(0).shape()
+        val output0Type  = interp.getOutputTensor(0).dataType()
+        val output1Type  = interp.getOutputTensor(1).dataType()
+        Log.d(TAG, "Output0 shape=${output0Shape.contentToString()} type=$output0Type  " +
+                   "Output1 type=$output1Type")
+
         val centerPointsIdx: Int
         val scoresIdx: Int
         // Detect output ordering by shape (robust to model export variation)
@@ -89,19 +95,52 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
             centerPointsIdx = 1; scoresIdx = 0
         }
 
-        val centerPoints = Array(1) { Array(MAX_SEGMENTS) { FloatArray(2) } }
-        val scores       = Array(1) { FloatArray(MAX_SEGMENTS) }
+        // Determine the data type of the center-points tensor.
+        // M-LSD's tiny model outputs INT32 pixel coordinates, not FLOAT32.
+        val cpType = interp.getOutputTensor(centerPointsIdx).dataType()
 
-        val outputMap = mutableMapOf<Int, Any>(
-            centerPointsIdx to centerPoints,
-            scoresIdx       to scores
-        )
+        val centerPointsFloat: Array<FloatArray>
+        val scores = Array(1) { FloatArray(MAX_SEGMENTS) }
 
-        val start = System.currentTimeMillis()
-        interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputMap)
-        Log.d(TAG, "Inference: ${System.currentTimeMillis() - start}ms")
+        if (cpType.name == "INT32") {
+            // INT32 path — allocate int buffers and convert after inference
+            val centerPointsInt = Array(1) { Array(MAX_SEGMENTS) { IntArray(2) } }
+            val outputMap = mutableMapOf<Int, Any>(
+                centerPointsIdx to centerPointsInt,
+                scoresIdx       to scores
+            )
+            val start = System.currentTimeMillis()
+            interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputMap)
+            Log.d(TAG, "Inference: ${System.currentTimeMillis() - start}ms")
 
-        return decodeToQuad(centerPoints[0], scores[0], bitmap.width, bitmap.height)
+            // Convert int → float for downstream processing
+            centerPointsFloat = Array(MAX_SEGMENTS) { i ->
+                floatArrayOf(
+                    centerPointsInt[0][i][0].toFloat(),
+                    centerPointsInt[0][i][1].toFloat()
+                )
+            }
+        } else {
+            // FLOAT32 path (original assumption)
+            val centerPointsBuf = Array(1) { Array(MAX_SEGMENTS) { FloatArray(2) } }
+            val outputMap = mutableMapOf<Int, Any>(
+                centerPointsIdx to centerPointsBuf,
+                scoresIdx       to scores
+            )
+            val start = System.currentTimeMillis()
+            interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputMap)
+            Log.d(TAG, "Inference: ${System.currentTimeMillis() - start}ms")
+
+            centerPointsFloat = centerPointsBuf[0]
+        }
+
+        // Score distribution diagnostics (helps verify preprocessing is correct)
+        val s = scores[0]
+        val nonZero = s.count { it > 0f }
+        Log.d(TAG, "Scores: min=%.4f max=%.4f mean=%.4f nonZero=$nonZero/${s.size}".format(
+            s.min(), s.max(), s.average().toFloat()))
+
+        return decodeToQuad(centerPointsFloat, scores[0], bitmap.width, bitmap.height)
     }
 
     // ─── C. POST-PROCESSING: CENTER POINTS → QUAD ────────────────────────────

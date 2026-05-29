@@ -493,123 +493,26 @@ vector<vector<cv::Point>> DocumentDetector::scanPoint(Mat &edged, Mat &image, bo
     double width = size.width;
     double height = size.height;
     std::vector<PointAreaMaxCosMeanCosWeight> foundSquares;
-    int iterration = 0;
-    cv::Mat temp1;
-    cv::Mat temp2;
-    if (options.medianBlurValue > 0) {
-        medianBlur(image, temp1, options.medianBlurValue);
-    } else {
-        temp1 = image;
-    }
+    cv::Mat gray;
+    cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
 
-    cv::Mat dilateStruct = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(std::max(1, (int)options.dilateAnchorSize), std::max(1, (int)options.dilateAnchorSize)));
-    cv::Mat morphologyStruct = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(std::max(1, (int)options.morphologyAnchorSize), std::max(1, (int)options.morphologyAnchorSize)));
-    int channelsCount = std::min(image.channels(), 3);
-    int i = channelsCount - 1;
-    int minI = 0;
-    if (options.useChannel >= 0)
+    // Apply CLAHE for adaptive contrast enhancement (helps on low-contrast scenes)
+    // Larger tile grid (16x16) balances quality vs speed versus the previous 8x8
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(16, 16));
+    cv::Mat grayEnhanced;
+    clahe->apply(gray, grayEnhanced);
+
+    // Standard Gaussian blur + Canny on the enhanced grayscale image
+    cv::GaussianBlur(grayEnhanced, grayEnhanced, cv::Size(5, 5), 0);
+    cv::Mat edges;
+    cv::Canny(grayEnhanced, edges, 50, 150);
+
+    edged = edges; // pass output back via the reference parameter
+
+    findSquares(edges, width, height, foundSquares, image, drawContours, 3000000.0f);
+    if (foundSquares.size() > 0)
     {
-        channelsCount = 1;
-        i = options.useChannel;
-        minI = options.useChannel;
-    }
-    // cvtColor(temp1, temp2, COLOR_BGR2GRAY);
-    // we give more weight to contours found with threshod then with higher canny
-
-    // --- B.2: Brightness-gated CLAHE ---
-    // Apply CLAHE only in dim conditions (mean brightness < 80).
-    // Skipping it on well-lit images avoids over-amplifying noise.
-    {
-        cv::Scalar meanVal = cv::mean(temp1);
-        double meanBrightness = (meanVal[0] + meanVal[1] + meanVal[2]) / 3.0;
-        const double CLAHE_THRESHOLD = 80.0;
-        if (meanBrightness < CLAHE_THRESHOLD) {
-            cv::Mat labImage;
-            cv::cvtColor(temp1, labImage, cv::COLOR_BGR2Lab);
-            std::vector<cv::Mat> labChannels;
-            cv::split(labImage, labChannels);
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
-            clahe->apply(labChannels[0], labChannels[0]);
-            cv::merge(labChannels, labImage);
-            cv::cvtColor(labImage, temp1, cv::COLOR_Lab2BGR);
-        }
-    }
-
-    int weight = 3000000;
-    // bool shoudlBreak = false;
-    for (i = i; i >= minI; i--)
-    {
-        //  std::printf("testing on channel %i %i\n", i, iterration);
-        cv::extractChannel(temp1, temp2, i);
-
-        // Auto-threshold via Otsu's method: finds the optimal threshold from the
-        // histogram — works equally on bright images (high Otsu value) AND dark
-        // images (low Otsu value). The old fixed thresh=160 silently killed detection
-        // on any document darker than 160 (e.g. dark book covers, tinted paper).
-        cv::Mat otsuEdged;
-        double otsuThresh = cv::threshold(temp2, otsuEdged, 0, 255,
-            cv::THRESH_BINARY | cv::THRESH_OTSU);
-        cv::morphologyEx(otsuEdged, otsuEdged, cv::MORPH_CLOSE, morphologyStruct);
-        cv::dilate(otsuEdged, edged, dilateStruct);
-        findSquares(edged, width, height, foundSquares, image, drawContours, (weight--));
-        if (foundSquares.size() > 0)
-        {
-            std::sort(foundSquares.begin(), foundSquares.end(), sortByArea);
-            auto firstContour = foundSquares[0];
-            if (std::get<2>(firstContour) < options.expectedOptimalMaxCosine && std::get<1>(firstContour) > (width * height * options.expectedAreaFactor))
-            {
-                // return true;
-                i = minI;
-                break;
-            }
-        }
-        // if (shoudlBreak)
-        // {
-        //     break;
-        // }
-        iterration++;
-        // we test over all channels to find the best contour
-        // Adaptive Canny: derive thresholds from Otsu's value so they scale with
-        // the actual image content. Dark images have low gradient magnitudes —
-        // fixed thresholds of 120/240 (t=60, cannyFactor=2) would miss all their edges.
-        // Using 0.33*otsuThresh and 0.66*otsuThresh as low/high is the established
-        // "auto-Canny" recipe from the OpenCV documentation and Canny's own paper.
-        int t = 3;  // multiplier steps: cannyLow = otsuThresh * t/9, high = otsuThresh * t/4.5
-        while (t >= 1)
-        {
-            double cannyLow  = otsuThresh * (t / 9.0);   // 1/9 to 3/9 of Otsu
-            double cannyHigh = otsuThresh * (t / 4.5);   // 2x cannyLow (Canny's 1:2 ratio)
-            // Clamp: never go below 5 (degenerate) or above 250 (no edges left)
-            cannyLow  = std::max(5.0, std::min(cannyLow,  240.0));
-            cannyHigh = std::max(10.0, std::min(cannyHigh, 250.0));
-            cv::Canny(temp2, edged, cannyLow, cannyHigh);
-
-            // --- B.1: Adaptive threshold edge fusion ---
-            // Fuse Canny edges with adaptive threshold edges.
-            // Adaptive thresholding finds edges that Canny misses in low-contrast
-            // and dark-scene captures (e.g. white paper on white desk, dim room).
-            {
-                cv::Mat adaptiveEdges;
-                cv::adaptiveThreshold(temp2, adaptiveEdges, 255,
-                    cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY_INV, 11, 2);
-                cv::bitwise_or(edged, adaptiveEdges, edged);
-            }
-
-            cv::dilate(edged, edged, dilateStruct);
-            findSquares(edged, width, height, foundSquares, image, drawContours, (weight--));
-            if (foundSquares.size() > 0)
-        {
-            std::sort(foundSquares.begin(), foundSquares.end(), sortByArea);
-            auto firstContour = foundSquares[0];
-            if (std::get<2>(firstContour) < options.expectedOptimalMaxCosine && std::get<1>(firstContour) > (width * height * options.expectedAreaFactor))
-            {
-                i = minI;
-                break;
-            }
-        }
-            iterration++;
-            t--;
-        }
+        std::sort(foundSquares.begin(), foundSquares.end(), sortByArea);
     }
     if (foundSquares.size() > 0)
     {

@@ -79,7 +79,9 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
             longArrayOf(1L, 3L, TARGET_SIZE.toLong(), TARGET_SIZE.toLong())
         )
 
+        val onnxStart = System.currentTimeMillis()
         val outputResult = session.run(mapOf(INPUT_NAME to inputTensor))
+        val onnxMs = System.currentTimeMillis() - onnxStart
         inputTensor.close()
 
         // ── Step 4: Extract the float data from the OnnxValue BEFORE closing the result ──
@@ -141,7 +143,13 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
 
         val confidence = computeConfidence(heatmaps, heatmapH, heatmapW)
         val maskScore  = computeMaskScore(maskRaw, corners, heatmapH, heatmapW)
+
+        // CHPS: mean peak sharpness across all 4 corner heatmaps
+        val sharpnessPerCorner = heatmaps.map { computePeakSharpness(it, heatmapH, heatmapW) }
+        val meanSharpness = sharpnessPerCorner.average().toFloat()
+
         Log.d(TAG, "maskScore=${maskScore.format()}  conf=${confidence.format()}  " +
+                   "chps=${meanSharpness.format(1)}  " +
                    "TL=${corners[0].fmt()}  TR=${corners[1].fmt()}  " +
                    "BR=${corners[2].fmt()}  BL=${corners[3].fmt()}")
 
@@ -151,7 +159,9 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
             bottomRight = corners[2],
             bottomLeft  = corners[3],
             confidence  = confidence,
-            maskScore   = maskScore
+            maskScore   = maskScore,
+            peakSharpness = meanSharpness,
+            onnxInferenceMs = onnxMs
         )
     }
 
@@ -292,6 +302,28 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
         )
     }
 
-    private fun Float.format() = "%.3f".format(this)
+    /**
+     * Corner Heatmap Peak Sharpness (CHPS).
+     * Computes the ratio of peak activation to mean activation for a single heatmap.
+     * A sharp, localized corner prediction produces a high ratio (10–30x).
+     * A flat, uncertain heatmap produces a low ratio (1–3x).
+     * Scale-invariant: unaffected by overall activation magnitude.
+     */
+    private fun computePeakSharpness(heatmap: Array<FloatArray>, heatmapH: Int, heatmapW: Int): Float {
+        var maxVal = Float.NEGATIVE_INFINITY
+        var sumVal = 0f
+        val count = heatmapH * heatmapW
+        for (r in 0 until heatmapH) {
+            for (c in 0 until heatmapW) {
+                val v = heatmap[r][c]
+                if (v > maxVal) maxVal = v
+                sumVal += v.coerceAtLeast(0f)  // only count positive activations in mean
+            }
+        }
+        val meanVal = if (count > 0) sumVal / count else 0f
+        return if (meanVal > 1e-6f) maxVal / meanVal else 0f
+    }
+
+    private fun Float.format(decimals: Int = 3) = "%.${decimals}f".format(this)
     private fun NormalizedPoint.fmt() = "(${x.format()},${y.format()})"
 }

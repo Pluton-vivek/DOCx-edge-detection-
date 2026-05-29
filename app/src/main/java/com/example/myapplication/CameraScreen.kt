@@ -41,6 +41,7 @@ import kotlinx.coroutines.withContext
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.Executors
+import com.example.myapplication.telemetry.TelemetryCoordinator
 
 // Data class to represent the points from the JSON
 data class PointF(val x: Float, val y: Float)
@@ -58,6 +59,7 @@ fun CameraScreen(
     var imageBounds by remember { mutableStateOf(android.util.Size(1, 1)) }
     // Guard: prevents double-tap capture and shows loading state during background detection
     var isCapturing by remember { mutableStateOf(false) }
+    var liveFrameCount by remember { mutableIntStateOf(0) }
 
     val imageCapture = remember {
         ImageCapture.Builder()
@@ -137,6 +139,17 @@ fun CameraScreen(
                             mlsdDetector = mlsdDetector
                         )
                         val (quad, method) = coordinator.detect(bitmap, opencvPoints)
+
+                        TelemetryCoordinator.reportCapture(
+                            quad     = quad,
+                            method   = method,
+                            onnxConf = quad.confidence,
+                            chps     = quad.peakSharpness,
+                            onnxMs   = quad.onnxInferenceMs,
+                            mlsdMs   = quad.mlsdInferenceMs
+                        )
+                        TelemetryCoordinator.emitCaptureSummary()
+
                         listOf(
                             PointF(quad.topLeft.x,     quad.topLeft.y),
                             PointF(quad.topRight.x,    quad.topRight.y),
@@ -198,6 +211,10 @@ fun CameraScreen(
                                 Handler(Looper.getMainLooper()).post {
                                     imageBounds = android.util.Size(w, h)
                                     detectedPoints = points
+                                    liveFrameCount++
+                                    if (liveFrameCount % 30 == 0) {
+                                        TelemetryCoordinator.emitLiveSummary(liveFrameCount)
+                                    }
                                 }
                             }
                         }
@@ -314,6 +331,17 @@ fun CameraScreen(
                                                 mlsdDetector = mlsdDetector
                                             )
                                             val (quad, method) = coordinator.detect(rotatedBitmap, opencvPoints)
+
+                                            TelemetryCoordinator.reportCapture(
+                                                quad     = quad,
+                                                method   = method,
+                                                onnxConf = quad.confidence,
+                                                chps     = quad.peakSharpness,
+                                                onnxMs   = quad.onnxInferenceMs,
+                                                mlsdMs   = quad.mlsdInferenceMs
+                                            )
+                                            TelemetryCoordinator.emitCaptureSummary()
+
                                             listOf(
                                                 PointF(quad.topLeft.x,     quad.topLeft.y),
                                                 PointF(quad.topRight.x,    quad.topRight.y),
@@ -371,6 +399,7 @@ private fun processImageProxy(imageProxy: ImageProxy, onPointsDetected: (List<Po
     val bitmap = imageProxy.toBitmap()
     val rotation = imageProxy.imageInfo.rotationDegrees
     try {
+        val cvStart = System.currentTimeMillis()
         val pointsJson = DocumentProcessor.nativeScanJSON(
             srcBitmap = bitmap,
             shrunkImageHeight = 500,
@@ -378,7 +407,15 @@ private fun processImageProxy(imageProxy: ImageProxy, onPointsDetected: (List<Po
             scale = 1.0,
             options = "{}"
         )
+        val cvMs = System.currentTimeMillis() - cvStart
         val points = parsePixelPoints(pointsJson)
+
+        // Report to telemetry (called on cameraExecutor — TelemetryCoordinator is synchronized)
+        val isPortrait = rotation == 90 || rotation == 270
+        val fw = if (isPortrait) imageProxy.height else imageProxy.width
+        val fh = if (isPortrait) imageProxy.width else imageProxy.height
+        TelemetryCoordinator.reportLiveFrame(points, fw, fh, cvMs)
+
         // LiveDetect tag: filter Logcat by 'LiveDetect' to debug detection without noise.
         // Comment out in release builds.
         if (points != null) {

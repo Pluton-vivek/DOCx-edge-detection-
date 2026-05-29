@@ -101,6 +101,7 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
 
         val centerPointsFloat: Array<FloatArray>
         val scores = Array(1) { FloatArray(MAX_SEGMENTS) }
+        var mlsdMs = 0L
 
         if (cpType.name == "INT32") {
             // INT32 path — allocate int buffers and convert after inference
@@ -111,7 +112,8 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
             )
             val start = System.currentTimeMillis()
             interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputMap)
-            Log.d(TAG, "Inference: ${System.currentTimeMillis() - start}ms")
+            mlsdMs = System.currentTimeMillis() - start
+            Log.d(TAG, "Inference: ${mlsdMs}ms")
 
             // Convert int → float for downstream processing
             centerPointsFloat = Array(MAX_SEGMENTS) { i ->
@@ -129,7 +131,8 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
             )
             val start = System.currentTimeMillis()
             interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputMap)
-            Log.d(TAG, "Inference: ${System.currentTimeMillis() - start}ms")
+            mlsdMs = System.currentTimeMillis() - start
+            Log.d(TAG, "Inference: ${mlsdMs}ms")
 
             centerPointsFloat = centerPointsBuf[0]
         }
@@ -140,7 +143,7 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
         Log.d(TAG, "Scores: min=%.4f max=%.4f mean=%.4f nonZero=$nonZero/${s.size}".format(
             s.min(), s.max(), s.average().toFloat()))
 
-        return decodeToQuad(centerPointsFloat, scores[0], bitmap.width, bitmap.height)
+        return decodeToQuad(centerPointsFloat, scores[0], bitmap.width, bitmap.height, mlsdMs)
     }
 
     // ─── C. POST-PROCESSING: CENTER POINTS → QUAD ────────────────────────────
@@ -162,7 +165,8 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
         centerPts: Array<FloatArray>,
         scoresArr: FloatArray,
         origW: Int,
-        origH: Int
+        origH: Int,
+        mlsdMs: Long
     ): NormalizedQuad? {
 
         // Step 1: Filter and convert coordinates
@@ -325,7 +329,8 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
             bottomRight = brN,
             bottomLeft  = blN,
             confidence  = confidence,
-            maskScore   = confidence    // reuse as maskScore; lines ARE the semantic evidence
+            maskScore   = confidence,   // reuse as maskScore; lines ARE the semantic evidence
+            mlsdInferenceMs = mlsdMs
         )
     }
 

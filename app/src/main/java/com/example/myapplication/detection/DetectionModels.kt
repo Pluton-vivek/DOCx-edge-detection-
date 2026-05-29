@@ -16,7 +16,10 @@ data class NormalizedQuad(
     val bottomRight: NormalizedPoint,
     val bottomLeft:  NormalizedPoint,
     val confidence:  Float,
-    val maskScore:   Float = 0f    // mean sigmoid of mask_logits within quad region
+    val maskScore:   Float = 0f,   // mean sigmoid of mask_logits within quad region
+    val peakSharpness: Float = 0f, // CHPS: peak/mean heatmap activation ratio
+    val onnxInferenceMs: Long = 0L,
+    val mlsdInferenceMs: Long = 0L
 )
 
 /**

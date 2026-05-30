@@ -285,14 +285,14 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
             return null
         }
 
-        // Step 3: Classify lines as horizontal (|a| < |b|) or vertical (|a| >= |b|)
-        // In ax + by + c = 0: 'a' is x-coefficient, 'b' is y-coefficient
-        // Horizontal line: nearly y = const → |a| small, |b| large → |a| < |b|
-        // Vertical line:   nearly x = const → |a| large, |b| small → |a| >= |b|
-        val horizontals = foundLines.filter { abs(it.a) < abs(it.b) }
-            .sortedByDescending { it.score }
-        val verticals   = foundLines.filter { abs(it.a) >= abs(it.b) }
-            .sortedByDescending { it.score }
+        // Step 3: Classify lines using relative angles instead of a hard 45-degree threshold.
+        // Sort all found lines by their absolute slope ratio: |a| / |b| = |tan(theta)|
+        // The two lines with the smallest ratio are the most horizontal.
+        // The two lines with the largest ratio are the most vertical.
+        val sortedLines = foundLines.sortedBy { abs(it.a) / (abs(it.b) + 1e-6f) }
+        
+        val horizontals = sortedLines.take(2).sortedByDescending { it.score }
+        val verticals   = sortedLines.takeLast(2).sortedByDescending { it.score }
 
         Log.d(TAG, "H lines: ${horizontals.size}  V lines: ${verticals.size}")
         if (horizontals.size < 2 || verticals.size < 2) {

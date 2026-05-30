@@ -25,7 +25,7 @@ class LetterboxPreprocessor {
      * Preprocessing steps:
      * 1. Scale image to fit inside targetSize × targetSize (preserves aspect ratio)
      * 2. Centre-pad with black pixels to exactly targetSize × targetSize
-     * 3. Normalize each channel: (pixel/255 - mean) / std  (ImageNet statistics)
+     * 3. Normalize each channel to [0.0, 1.0]: pixel / 255f
      * 4. Lay channels in R-plane first, then G, then B (CHW order)
      *
      * @param bitmap     Input bitmap (any size, any aspect ratio).
@@ -50,8 +50,7 @@ class LetterboxPreprocessor {
         c.drawBitmap(scaledBitmap, padX.toFloat(), padY.toFloat(), null)
         scaledBitmap.recycle()
 
-        // Step 3 & 4 — convert to CHW float array with ImageNet normalization
-        // mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]
+        // Step 3 & 4 — convert to CHW float array with [0.0, 1.0] normalization
         val pixels = IntArray(targetSize * targetSize)
         canvas256.getPixels(pixels, 0, targetSize, 0, 0, targetSize, targetSize)
         canvas256.recycle()
@@ -59,18 +58,15 @@ class LetterboxPreprocessor {
         val planeSize = targetSize * targetSize
         val floatArray = FloatArray(3 * planeSize)
 
-        val mean = floatArrayOf(0.485f, 0.456f, 0.406f)
-        val std  = floatArrayOf(0.229f, 0.224f, 0.225f)
-
         for (i in pixels.indices) {
             val pixel = pixels[i]
             val r = ((pixel shr 16) and 0xFF) / 255f
             val g = ((pixel shr  8) and 0xFF) / 255f
             val b = ( pixel         and 0xFF) / 255f
             // CHW layout: R-plane [0..planeSize), G-plane [planeSize..2*planeSize), B-plane [2*planeSize..3*planeSize)
-            floatArray[0 * planeSize + i] = (r - mean[0]) / std[0]
-            floatArray[1 * planeSize + i] = (g - mean[1]) / std[1]
-            floatArray[2 * planeSize + i] = (b - mean[2]) / std[2]
+            floatArray[0 * planeSize + i] = r
+            floatArray[1 * planeSize + i] = g
+            floatArray[2 * planeSize + i] = b
         }
 
         return Pair(floatArray, PadInfo(scale, padX, padY))

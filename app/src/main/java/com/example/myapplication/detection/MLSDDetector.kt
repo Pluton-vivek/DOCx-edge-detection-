@@ -32,24 +32,35 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
      * Android Bitmap.getPixels returns 0xAARRGGBB — reorder to RGBA when filling buffer.
      */
     private fun preprocess(bitmap: Bitmap): ByteBuffer {
-        val scaled = if (bitmap.width != INPUT_SIZE || bitmap.height != INPUT_SIZE) {
-            Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        } else bitmap
+        // Letterbox: scale to fit INPUT_SIZE×INPUT_SIZE preserving aspect ratio.
+        // Pad remaining space with black. This keeps line angles correct.
+        val scale = minOf(INPUT_SIZE.toFloat() / bitmap.width,
+                          INPUT_SIZE.toFloat() / bitmap.height)
+        val scaledW = (bitmap.width  * scale).toInt().coerceAtLeast(1)
+        val scaledH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+        val padLeft = (INPUT_SIZE - scaledW) / 2
+        val padTop  = (INPUT_SIZE - scaledH) / 2
 
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        scaled.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        val canvas = android.graphics.Bitmap.createBitmap(
+            INPUT_SIZE, INPUT_SIZE, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(canvas)
+        c.drawColor(android.graphics.Color.BLACK)
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            bitmap, scaledW, scaledH, true)
+        c.drawBitmap(scaled, padLeft.toFloat(), padTop.toFloat(), null)
         if (scaled !== bitmap) scaled.recycle()
 
-        // 4 channels × 4 bytes each × 320 × 320 pixels
+        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
+        canvas.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        canvas.recycle()
+
         val buffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 4 * 4)
             .order(ByteOrder.nativeOrder())
-
         for (pixel in pixels) {
             val r = ((pixel shr 16) and 0xFF).toFloat()
             val g = ((pixel shr  8) and 0xFF).toFloat()
             val b = ( pixel         and 0xFF).toFloat()
             val a = ((pixel shr 24) and 0xFF).toFloat()
-            // Feed raw [0, 255] — model handles normalization internally
             buffer.putFloat(r)
             buffer.putFloat(g)
             buffer.putFloat(b)
@@ -175,8 +186,16 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
         for (i in 0 until MAX_SEGMENTS) {
             if (scoresArr[i] < SCORE_THRESHOLD) continue
             // col/row in 160×160 → normalize to [0,1]
-            val nx = centerPts[i][0] / HEATMAP_SIZE.toFloat()
-            val ny = centerPts[i][1] / HEATMAP_SIZE.toFloat()
+            // Recompute letterbox parameters matching preprocess() exactly
+            val lbScale   = minOf(INPUT_SIZE.toFloat() / origW, INPUT_SIZE.toFloat() / origH)
+            val lbPadLeft = (INPUT_SIZE - origW * lbScale) / 2f
+            val lbPadTop  = (INPUT_SIZE - origH * lbScale) / 2f
+            // Heatmap is half the input resolution (HEATMAP_SIZE = INPUT_SIZE / 2 = 160)
+            // so multiply by 2 to convert to INPUT_SIZE space, then subtract padding
+            val inputX = centerPts[i][0].toFloat() * 2f
+            val inputY = centerPts[i][1].toFloat() * 2f
+            val nx = (inputX - lbPadLeft) / (origW * lbScale)
+            val ny = (inputY - lbPadTop)  / (origH * lbScale)
             if (nx in 0f..1f && ny in 0f..1f) {
                 pts.add(Pt(nx, ny, scoresArr[i]))
             }
@@ -255,6 +274,12 @@ class MLSDDetector(private val sessionManager: MLSDSessionManager = MLSDSessionM
         }
 
         Log.d(TAG, "Lines found: ${foundLines.size}")
+        val lineInfo = foundLines.mapIndexed { i, l ->
+            val isH = abs(l.a) < abs(l.b)
+            val ratio = "%.2f".format(abs(l.a) / (abs(l.b) + 1e-6f))
+            "L$i:${if (isH) "H" else "V"}(ratio=$ratio,score=${"%.2f".format(l.score)})"
+        }.joinToString("  ")
+        Log.d(TAG, "Line orientations: $lineInfo")
         if (foundLines.size < 4) {
             Log.d(TAG, "Could not find 4 lines")
             return null

@@ -2,6 +2,7 @@ package com.example.myapplication.detection
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.example.myapplication.telemetry.TelemetryCoordinator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -66,6 +67,10 @@ class HybridDetectionCoordinator(
         } else null
 
         // --- Step 3: Decision logic ---
+        // Record raw ONNX metrics BEFORE routing decision so telemetry always
+        // captures them regardless of which path is ultimately selected.
+        TelemetryCoordinator.recordRawOnnxResult(onnxQuad)
+
         when {
             onnxQuad != null
             && onnxQuad.confidence >= onnxConfidenceThreshold

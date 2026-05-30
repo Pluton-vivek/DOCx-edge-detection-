@@ -145,6 +145,32 @@ object TelemetryCoordinator {
         if (qgvsValues.size > 50) qgvsValues.removeFirst()
     }
 
+    /**
+     * Records raw ONNX inference metrics BEFORE the routing decision.
+     * Must be called from HybridDetectionCoordinator after ONNX runs,
+     * regardless of which path is ultimately selected.
+     */
+    @Synchronized
+    fun recordRawOnnxResult(onnxQuad: NormalizedQuad?) {
+        if (onnxQuad == null) return
+        if (onnxQuad.confidence > 0f) {
+            onnxConfs.addLast(onnxQuad.confidence)
+            if (onnxConfs.size > 50) onnxConfs.removeFirst()
+        }
+        if (onnxQuad.peakSharpness > 0f) {
+            chpsValues.addLast(onnxQuad.peakSharpness)
+            if (chpsValues.size > 50) chpsValues.removeFirst()
+        }
+        if (onnxQuad.onnxInferenceMs > 0L) {
+            onnxLatencies.addLast(onnxQuad.onnxInferenceMs)
+            if (onnxLatencies.size > 20) onnxLatencies.removeFirst()
+        }
+        if (onnxQuad.mlsdInferenceMs > 0L) {
+            mlsdLatencies.addLast(onnxQuad.mlsdInferenceMs)
+            if (mlsdLatencies.size > 20) mlsdLatencies.removeFirst()
+        }
+    }
+
     /** Emit a JSON live-frame summary. Call every 30 live frames. */
     @Synchronized
     fun emitLiveSummary(framesAnalyzed: Int) {
@@ -152,8 +178,11 @@ object TelemetryCoordinator {
         val tIou = if (tIouWindow.isEmpty()) -1f else tIouWindow.average().toFloat()
         val tIouMin = tIouWindow.minOrNull() ?: -1f
         val cvMil = cvLatencies.average().toLong()
-        val dlfl = if (firstStableLockMs > 0L && noQuadSinceMs > 0L)
-            (firstStableLockMs - noQuadSinceMs) else -1L
+        val dlfl = if (firstStableLockMs > 0L &&
+                       noQuadSinceMs > 0L &&
+                       firstStableLockMs > noQuadSinceMs)
+                       (firstStableLockMs - noQuadSinceMs)
+                   else -1L
 
         val json = buildString {
             append("{")
@@ -172,8 +201,9 @@ object TelemetryCoordinator {
     /** Emit a JSON capture summary. Call after each shutter capture completes. */
     @Synchronized
     fun emitCaptureSummary() {
-        val onnxMean = onnxConfs.average().toFloat()
-        val ccg      = ONNX_CONFIDENCE_THRESHOLD - onnxMean
+        val onnxMean = if (onnxConfs.isEmpty()) -1f
+                       else (onnxConfs.sumOf { it.toDouble() } / onnxConfs.size).toFloat()
+        val ccg = if (onnxMean < 0f) -1f else ONNX_CONFIDENCE_THRESHOLD - onnxMean
         val padOnnx  = if (captureCount > 0) onnxCount.toFloat()    / captureCount else 0f
         val padCv    = if (captureCount > 0) opencvCount.toFloat()  / captureCount else 0f
         val padMlsd  = if (captureCount > 0) mlsdCount.toFloat()    / captureCount else 0f

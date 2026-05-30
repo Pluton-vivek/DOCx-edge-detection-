@@ -133,6 +133,16 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
         val heatmapW = heatmaps[0][0].size
         Log.d(TAG, "Heatmap shape: 4×${heatmapH}×${heatmapW}")
 
+        val cornerNames = listOf("TL", "TR", "BR", "BL")
+        val peakActivations = heatmaps.mapIndexed { idx, h ->
+            var peak = Float.NEGATIVE_INFINITY
+            for (r in 0 until heatmapH) for (c in 0 until heatmapW) {
+                if (h[r][c] > peak) peak = h[r][c]
+            }
+            "${cornerNames[idx]}=${"%.3f".format(peak)}"
+        }.joinToString("  ")
+        Log.d(TAG, "Corner peak activations: $peakActivations")
+
         val corners = Array(4) { idx ->
             decodeHeatmap(
                 heatmaps[idx], heatmapH, heatmapW,
@@ -309,19 +319,26 @@ class DocQuadNetDetector(private val onnxSessionManager: OnnxSessionManager) {
      * A flat, uncertain heatmap produces a low ratio (1–3x).
      * Scale-invariant: unaffected by overall activation magnitude.
      */
-    private fun computePeakSharpness(heatmap: Array<FloatArray>, heatmapH: Int, heatmapW: Int): Float {
+    private fun computePeakSharpness(
+        heatmap: Array<FloatArray>,
+        heatmapH: Int,
+        heatmapW: Int
+    ): Float {
         var maxVal = Float.NEGATIVE_INFINITY
+        var minVal = Float.MAX_VALUE
         var sumVal = 0f
         val count = heatmapH * heatmapW
         for (r in 0 until heatmapH) {
             for (c in 0 until heatmapW) {
                 val v = heatmap[r][c]
                 if (v > maxVal) maxVal = v
-                sumVal += v.coerceAtLeast(0f)  // only count positive activations in mean
+                if (v < minVal) minVal = v
+                sumVal += v
             }
         }
-        val meanVal = if (count > 0) sumVal / count else 0f
-        return if (meanVal > 1e-6f) maxVal / meanVal else 0f
+        val range = maxVal - minVal
+        val meanVal = if (count > 0) sumVal / count else minVal
+        return if (range > 1e-6f) ((maxVal - meanVal) / range).coerceIn(0f, 1f) else 0f
     }
 
     private fun Float.format(decimals: Int = 3) = "%.${decimals}f".format(this)

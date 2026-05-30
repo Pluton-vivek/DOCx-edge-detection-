@@ -5,6 +5,8 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+import com.example.myapplication.telemetry.TelemetryCoordinator
+
 private const val TAG = "HybridCoordinator"
 
 /**
@@ -51,6 +53,8 @@ class HybridDetectionCoordinator(
             Log.e(TAG, "ONNX inference failed: ${e.message}")
             null
         }
+
+        TelemetryCoordinator.recordRawOnnxResult(onnxQuad)
 
         // --- Step 2: M-LSD inference (only when ONNX is uncertain — saves ~30ms on happy path) ---
         val mlsdQuad = if (
